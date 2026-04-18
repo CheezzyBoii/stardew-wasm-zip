@@ -1,6 +1,29 @@
 const loading = document.getElementById("loading");
 const canvas = document.getElementById("canvas");
 const musicChoice = document.getElementById("music-choice");
+const progressContainer = document.getElementById("progress-container");
+const progressText = document.getElementById("progress-text");
+const progressFill = document.getElementById("progress-fill");
+
+// --- Progress tracking ---
+let progressState = { current: 0, total: 100 };
+function updateProgress(current, total, label) {
+	progressState = { current, total };
+	const percent = Math.min(100, Math.round((current / total) * 100));
+	progressText.textContent = label;
+	progressFill.style.width = percent + "%";
+	progressFill.textContent = percent + "%";
+}
+
+// --- Load jszip ---
+updateProgress(0, 100, "Loading libraries...");
+await new Promise((resolve) => {
+	const s = document.createElement("script");
+	s.src = "https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js";
+	s.onload = resolve;
+	document.head.appendChild(s);
+});
+const JSZip = window.JSZip;
 
 // --- OPFS helpers ---
 const opfs = await navigator.storage.getDirectory();
@@ -16,9 +39,8 @@ async function opfsWrite(name, data) {
 	await w.write(data); await w.close();
 }
 
-// --- Chunked tar download ---
-async function downloadTar(base, label) {
-	loading.textContent = `Downloading ${label}...`;
+// --- Chunked download ---
+async function downloadChunked(base, label, estimatedSize) {
 	const count = parseInt(await (await fetch(base + ".count")).text());
 	const chunks = [];
 	let total = 0;
@@ -26,43 +48,58 @@ async function downloadTar(base, label) {
 		const res = await fetch(`${base}${String(i).padStart(2, "0")}`);
 		if (!res.ok) throw new Error(`Failed: ${res.status}`);
 		const reader = res.body.getReader();
+		const contentLength = parseInt(res.headers.get("content-length") || "0");
+		let chunkBytes = 0;
 		for (;;) {
 			const { done, value } = await reader.read();
 			if (done) break;
 			chunks.push(value);
 			total += value.length;
-			loading.textContent = `Downloading ${label}... ${(total / 1048576) | 0} MB`;
+			chunkBytes += value.length;
+			updateProgress(total, estimatedSize, `Downloading ${label}... ${(total / 1048576).toFixed(1)} MB`);
 		}
 	}
-	const tar = new Uint8Array(total);
+	const data = new Uint8Array(total);
 	let off = 0;
-	for (const c of chunks) { tar.set(c, off); off += c.length; }
-	return tar;
+	for (const c of chunks) { data.set(c, off); off += c.length; }
+	return data;
 }
 
-async function getTar(base, label, key) {
+async function getArchive(base, label, key, estimatedSize) {
 	try {
-		loading.textContent = `Loading cached ${label}...`;
+		updateProgress(0, 100, `Loading cached ${label}...`);
 		return await opfsRead(key);
 	} catch {
-		const tar = await downloadTar(base, label);
-		try { loading.textContent = `Caching ${label}...`; await opfsWrite(key, tar); } catch {}
-		return tar;
+		const archive = await downloadChunked(base, label, estimatedSize);
+		try {
+			updateProgress(0, 100, `Caching ${label}...`);
+			await opfsWrite(key, archive);
+		} catch {}
+		return archive;
 	}
 }
 
 // --- Music choice (skip if audio already cached) ---
-const audioCached = await opfsHas("ContentAudio.tar");
+const audioCached = await opfsHas("Content.zip");
 const wantMusic = audioCached || await new Promise((resolve) => {
 	musicChoice.style.display = "";
-	document.getElementById("btn-no-music").onclick = () => { musicChoice.style.display = "none"; resolve(false); };
-	document.getElementById("btn-with-music").onclick = () => { musicChoice.style.display = "none"; resolve(true); };
+	document.getElementById("btn-no-music").onclick = () => {
+		musicChoice.style.display = "none";
+		resolve(false);
+	};
+	document.getElementById("btn-with-music").onclick = () => {
+		musicChoice.style.display = "none";
+		resolve(true);
+	};
 });
-musicChoice.style.display = "none";
+if (!audioCached) musicChoice.style.display = "none";
 
-// --- Parallel: download tars + boot runtime ---
-const contentP = getTar("Content.tar", "game content", "Content.tar");
-const audioP = wantMusic ? getTar("ContentAudio.tar", "music", "ContentAudio.tar") : Promise.resolve(null);
+// --- Parallel: download zips + boot runtime ---
+// Estimated sizes in MB (from compression results)
+updateProgress(5, 100, "Starting downloads...");
+progressContainer.classList.add("visible");
+const contentP = getArchive("Content.zip", "game content", "Content.zip", 57 * 1024 * 1024);
+const audioP = wantMusic ? getArchive("ContentAudio.zip", "music", "ContentAudio.zip", 358 * 1024 * 1024) : Promise.resolve(null);
 const runtimeP = (async () => {
 	const { dotnet } = await import("./_framework/dotnet.js");
 	return dotnet
@@ -104,53 +141,60 @@ const runtimeP = (async () => {
 		.create();
 })();
 
-const [contentTar, audioTar, runtime] = await Promise.all([contentP, audioP, runtimeP]);
+updateProgress(30, 100, "Bootstrapping runtime...");
+const [contentZip, audioZip, runtime] = await Promise.all([contentP, audioP, runtimeP]);
+updateProgress(50, 100, "Initializing runtime...");
 const exports = await runtime.getAssemblyExports(runtime.getConfig().mainAssemblyName);
+updateProgress(55, 100, "Preparing game...");
 
-// --- Extract tar into WasmFS ---
-function extractTar(tar, prefix) {
-	let pos = 0, count = 0;
-	const dec = new TextDecoder();
-	const str = (buf, o, n) => { let e = o; while (e < o + n && buf[e]) e++; return dec.decode(buf.subarray(o, e)); };
-	const oct = (buf, o, n) => { const s = str(buf, o, n).trim(); return s ? parseInt(s, 8) : 0; };
-	while (pos + 512 <= tar.length) {
-		const h = tar.subarray(pos, pos + 512);
-		if (!h[0]) break;
-		const name = str(h, 0, 100), size = oct(h, 124, 12), type = h[156];
-		const pref = str(h, 345, 155);
-		const full = pref ? pref + "/" + name : name;
-		pos += 512;
-		if (type === 53 || name.endsWith("/")) {
-			exports.WasmBootstrap.CreateContentDirectory(prefix + full);
-		} else if (type === 48 || type === 0) {
-			exports.WasmBootstrap.WriteContentFile(prefix + full, tar.subarray(pos, pos + size));
+// --- Extract ZIP into WasmFS ---
+async function extractZip(zipData, prefix, progressOffset = 0, progressScale = 1) {
+	if (!zipData) return 0;
+	const zip = await JSZip.loadAsync(zipData);
+	const entries = Object.entries(zip.files);
+	let count = 0;
+	for (let idx = 0; idx < entries.length; idx++) {
+		const [path, file] = entries[idx];
+		if (file.dir) {
+			exports.WasmBootstrap.CreateContentDirectory(prefix + "/" + path);
+		} else {
+			const data = await file.async("uint8array");
+			exports.WasmBootstrap.WriteContentFile(prefix + "/" + path, data);
 			count++;
 		}
-		pos += Math.ceil(size / 512) * 512;
+		const progress = progressOffset + ((idx / entries.length) * progressScale);
+		updateProgress(progress, 100, `Extracting files... ${idx}/${entries.length}`);
 	}
 	return count;
 }
 
 await runtime.runMain();
+updateProgress(60, 100, "Starting game engine...");
 await exports.WasmBootstrap.PreInit();
 
 // Restore saves from OPFS
 try {
-	const savesTar = await opfsRead("Saves.tar");
+	updateProgress(65, 100, "Loading saves...");
+	const savesZip = await opfsRead("Saves.zip");
 	exports.WasmBootstrap.CreateContentDirectory("/libsdl/saves/Saves");
-	extractTar(savesTar, "/libsdl/saves/Saves/");
+	await extractZip(savesZip, "/libsdl/saves/Saves", 65, 5);
 } catch {}
 
-loading.textContent = "Loading game files...";
-extractTar(contentTar, "/libsdl/");
-if (audioTar) { loading.textContent = "Loading music..."; extractTar(audioTar, "/libsdl/"); }
+updateProgress(70, 100, "Loading game files...");
+await extractZip(contentZip, "/libsdl", 70, 15);
+if (audioZip) {
+	updateProgress(85, 100, "Loading music...");
+	await extractZip(audioZip, "/libsdl", 85, 10);
+}
 
-loading.classList.add("hidden");
-
+updateProgress(95, 100, "Initializing canvas...");
 const dpr = window.devicePixelRatio || 1;
 const w = Math.round(canvas.clientWidth * dpr) || 1280;
 const h = Math.round(canvas.clientHeight * dpr) || 720;
 await exports.WasmBootstrap.Init(w, h);
+updateProgress(99, 100, "Starting game...");
+
+loading.classList.add("hidden");
 
 new ResizeObserver(() => {
 	const dpr = window.devicePixelRatio || 1;

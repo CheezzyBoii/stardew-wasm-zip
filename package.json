@@ -1,0 +1,25 @@
+{
+  "name": "stardew-valley",
+  "version": "1.0.0",
+  "description": "pls report issues here. give credits if you add to your site. play at https://degloved.net/gms/stardew-valley",
+  "main": "convert-to-zip.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/degloved-net/stardew-wasm.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/degloved-net/stardew-wasm/issues"
+  },
+  "homepage": "https://github.com/degloved-net/stardew-wasm#readme",
+  "dependencies": {
+    "archiver": "^7.0.1",
+    "jszip": "^3.10.1"
+  }
+}
