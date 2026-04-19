@@ -5,6 +5,17 @@ const progressContainer = document.getElementById("progress-container");
 const progressText = document.getElementById("progress-text");
 const progressFill = document.getElementById("progress-fill");
 
+const moduleAuthQuery = new URL(import.meta.url).search;
+function withAuthQuery(resource) {
+	const url = new URL(resource, window.location.href);
+	if (!moduleAuthQuery) return url.toString();
+	const params = new URLSearchParams(moduleAuthQuery);
+	for (const [key, value] of params) {
+		if (!url.searchParams.has(key)) url.searchParams.set(key, value);
+	}
+	return url.toString();
+}
+
 // --- Progress tracking ---
 let progressState = { current: 0, total: 100 };
 function updateProgress(current, total, label) {
@@ -41,11 +52,11 @@ async function opfsWrite(name, data) {
 
 // --- Chunked download ---
 async function downloadChunked(base, label, estimatedSize) {
-	const count = parseInt(await (await fetch(base + ".count")).text());
+	const count = parseInt(await (await fetch(withAuthQuery(base + ".count"))).text());
 	const chunks = [];
 	let total = 0;
 	for (let i = 0; i < count; i++) {
-		const res = await fetch(`${base}${String(i).padStart(2, "0")}`);
+		const res = await fetch(withAuthQuery(`${base}${String(i).padStart(2, "0")}`));
 		if (!res.ok) throw new Error(`Failed: ${res.status}`);
 		const reader = res.body.getReader();
 		const contentLength = parseInt(res.headers.get("content-length") || "0");
@@ -101,7 +112,7 @@ progressContainer.classList.add("visible");
 const contentP = getArchive("Content.zip", "game content", "Content.zip", 57 * 1024 * 1024);
 const audioP = wantMusic ? getArchive("ContentAudio.zip", "music", "ContentAudio.zip", 358 * 1024 * 1024) : Promise.resolve(null);
 const runtimeP = (async () => {
-	const { dotnet } = await import("./_framework/dotnet.js");
+	const { dotnet } = await import(withAuthQuery("./_framework/dotnet.js"));
 	return dotnet
 		.withModuleConfig({ canvas })
 		.withEnvironmentVariable("MONO_SLEEP_ABORT_LIMIT", "99999")
@@ -115,11 +126,11 @@ const runtimeP = (async () => {
 		.withResourceLoader((type, _name, defaultUri, _integrity, behavior) => {
 			if (type === "dotnetwasm" && behavior === "dotnetwasm") {
 				return (async () => {
-					const count = parseInt(await (await fetch(defaultUri + ".count")).text());
+					const count = parseInt(await (await fetch(withAuthQuery(defaultUri + ".count"))).text());
 					let idx = 0;
 					const fetchNext = async () => {
 						if (idx >= count) return null;
-						const res = await fetch(defaultUri + idx);
+						const res = await fetch(withAuthQuery(defaultUri + idx));
 						idx++;
 						return res.ok ? res.body.getReader() : null;
 					};
